@@ -1,0 +1,244 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <title>n×n Kings Puzzle</title>
+  <style>
+    body { font-family: sans-serif; display: flex; flex-direction: column; align-items: center; margin: 20px; }
+    #controls { margin-bottom: 10px; display: flex; align-items: center; gap: 10px; flex-wrap: wrap; }
+    #controls button, #controls input { padding: 5px; font-size: 14px; }
+    canvas { border: 1px solid #000; margin-top: 10px; }
+    #feedback { margin-top: 8px; font-style: italic; color: #900; }
+  </style>
+</head>
+<body>
+  <div id="controls">
+    <label>n (board size):<input id="sizeInput" type="number" min="1" value="8"></label>
+    <label>k (max per row/col):<input id="maxLineInput" type="number" min="1" value="2"></label>
+    <label>Attempts:<input id="attemptsInput" type="number" min="1" value="1000"></label>
+    <button id="resetBtn">Reset</button>
+    <button id="randomBtn">Place Randomly</button>
+    <button id="addLBtn">Add L</button>
+    <button id="addTBtn">Add T</button>
+    <button id="solveBtn" disabled>Solve (Disabled)</button>
+    <span id="count">Kings: 0</span>
+  </div>
+  <canvas id="boardCanvas"></canvas>
+  <div id="feedback"></div>
+
+  <script>
+    const canvas = document.getElementById('boardCanvas');
+    const ctx = canvas.getContext('2d');
+    const SQUARE_SIZE = 40, BATCH_SIZE = 10;
+    let BOARD_SIZE = 8, MAX_LINE = 2;
+    const countSpan = document.getElementById('count');
+    const feedbackDiv = document.getElementById('feedback');
+    const resetBtn = document.getElementById('resetBtn');
+    const randomBtn = document.getElementById('randomBtn');
+    const addLBtn = document.getElementById('addLBtn');
+    const addTBtn = document.getElementById('addTBtn');
+    const solveBtn = document.getElementById('solveBtn');
+    const sizeInput = document.getElementById('sizeInput');
+    const maxLineInput = document.getElementById('maxLineInput');
+    const attemptsInput = document.getElementById('attemptsInput');
+
+    let kings = [], hasKing = [], isRestricted = [], rowCounts = [], colCounts = [], allSquares = [];
+    let attempts = 0, maxAttempts = 0;
+
+    const neighborOffsets = [];
+    for (let dr = -1; dr <= 1; dr++) for (let dc = -1; dc <= 1; dc++) if (dr || dc) neighborOffsets.push([dr, dc]);
+
+    function initBuffers() {
+      kings = [];
+      hasKing = Array.from({ length: BOARD_SIZE }, () => Array(BOARD_SIZE).fill(false));
+      isRestricted = Array.from({ length: BOARD_SIZE }, () => Array(BOARD_SIZE).fill(false));
+      rowCounts = Array(BOARD_SIZE).fill(0);
+      colCounts = Array(BOARD_SIZE).fill(0);
+      allSquares = [];
+      for (let r = 0; r < BOARD_SIZE; r++) for (let c = 0; c < BOARD_SIZE; c++) allSquares.push([r, c]);
+    }
+
+    function updateDimensions() {
+      BOARD_SIZE = Math.max(1, parseInt(sizeInput.value) || 1);
+      MAX_LINE = Math.max(1, parseInt(maxLineInput.value) || 1);
+      canvas.width = BOARD_SIZE * SQUARE_SIZE;
+      canvas.height = BOARD_SIZE * SQUARE_SIZE;
+      initBuffers();
+      drawBoard();
+      feedbackDiv.textContent = '';
+    }
+    sizeInput.addEventListener('change', updateDimensions);
+    maxLineInput.addEventListener('change', updateDimensions);
+
+    resetBtn.addEventListener('click', () => { initBuffers(); drawBoard(); feedbackDiv.textContent = ''; });
+    randomBtn.addEventListener('click', () => { attempts = 0; maxAttempts = Math.max(1, parseInt(attemptsInput.value) || 1); initBuffers(); runRandomBatch(); });
+
+    addLBtn.addEventListener('click', () => {
+      BOARD_SIZE++;
+      sizeInput.value = BOARD_SIZE;
+      hasKing.forEach(row => row.push(false));
+      isRestricted.forEach(row => row.push(false));
+      hasKing.push(Array(BOARD_SIZE).fill(false));
+      isRestricted.push(Array(BOARD_SIZE).fill(false));
+      rowCounts.push(0);
+      colCounts.push(0);
+      rebuildSquares();
+      resizeCanvas();
+      drawBoard();
+    });
+
+    addTBtn.addEventListener('click', () => {
+      const oldSize = BOARD_SIZE;
+      const insertIdx = (oldSize % 2 === 0) ? (oldSize / 2) : Math.floor(oldSize / 2);
+      BOARD_SIZE = oldSize + 1;
+      sizeInput.value = BOARD_SIZE;
+      // Expand grid: insert new column
+      hasKing.forEach(row => row.splice(insertIdx, 0, false));
+      isRestricted.forEach(row => row.splice(insertIdx, 0, false));
+      // Append new row
+      hasKing.push(Array(BOARD_SIZE).fill(false));
+      isRestricted.push(Array(BOARD_SIZE).fill(false));
+      rowCounts.push(0);
+      colCounts.splice(insertIdx, 0, 0);
+      rebuildSquares();
+      resizeCanvas();
+      // Remap existing kings and update buffers
+      const oldKings = [...kings];
+      kings = [];
+      hasKing.forEach(row => row.fill(false));
+      rowCounts.fill(0);
+      colCounts.fill(0);
+      oldKings.forEach(([r, c]) => {
+        const newC = c >= insertIdx ? c + 1 : c;
+        kings.push([r, newC]);
+        hasKing[r][newC] = true;
+        rowCounts[r]++;
+        colCounts[newC]++;
+      });
+      // Recompute restrictions
+      isRestricted.forEach(row => row.fill(false));
+      kings.forEach(([r, c]) => neighborOffsets.forEach(([dr, dc]) => {
+        const nr = r + dr, nc = c + dc;
+        if (nr >= 0 && nr < BOARD_SIZE && nc >= 0 && nc < BOARD_SIZE && !hasKing[nr][nc]) {
+          isRestricted[nr][nc] = true;
+        }
+      }));
+      drawBoard();
+    });
+
+    function rebuildSquares() {
+      allSquares = [];
+      for (let r = 0; r < BOARD_SIZE; r++) for (let c = 0; c < BOARD_SIZE; c++) allSquares.push([r, c]);
+    }
+
+    function resizeCanvas() {
+      canvas.width = BOARD_SIZE * SQUARE_SIZE;
+      canvas.height = BOARD_SIZE * SQUARE_SIZE;
+    }
+
+    solveBtn.disabled = true;
+
+    function isSolved() {
+      return rowCounts.every(c => c === MAX_LINE) && colCounts.every(c => c === MAX_LINE);
+    }
+
+    function runRandomBatch() {
+      for (let i = 0; i < BATCH_SIZE && attempts < maxAttempts; i++) {
+        attempts++;
+        randomPass();
+        if (isSolved()) break;
+      }
+      drawBoard();
+      const solvedRows = rowCounts.filter(c => c === MAX_LINE).length;
+      feedbackDiv.textContent = `Attempt ${attempts}/${maxAttempts}, rows solved: ${solvedRows}/${BOARD_SIZE}`;
+      if (isSolved()) feedbackDiv.textContent = `Solved in ${attempts} attempts.`;
+      else if (attempts < maxAttempts) setTimeout(runRandomBatch, 0);
+      else feedbackDiv.textContent = `After ${maxAttempts}, best ${solvedRows}/${BOARD_SIZE}.`;
+    }
+
+    function randomPass() {
+      for (let i = allSquares.length - 1; i > 0; i--) {
+        const j = (Math.random() * (i + 1)) | 0;
+        [allSquares[i], allSquares[j]] = [allSquares[j], allSquares[i]];
+      }
+      kings = [];
+      hasKing.forEach(row => row.fill(false));
+      isRestricted.forEach(row => row.fill(false));
+      rowCounts.fill(0);
+      colCounts.fill(0);
+      for (const [r, c] of allSquares) {
+        if (isRestricted[r][c] || rowCounts[r] >= MAX_LINE || colCounts[c] >= MAX_LINE) continue;
+        placeKing(r, c);
+        if (isSolved()) break;
+      }
+    }
+
+    function placeKing(r, c) {
+      kings.push([r, c]);
+      hasKing[r][c] = true;
+      rowCounts[r]++;
+      colCounts[c]++;
+      neighborOffsets.forEach(([dr, dc]) => {
+        const nr = r + dr, nc = c + dc;
+        if (nr >= 0 && nr < BOARD_SIZE && nc >= 0 && nc < BOARD_SIZE && !hasKing[nr][nc]) {
+          isRestricted[nr][nc] = true;
+        }
+      });
+    }
+
+    canvas.addEventListener('click', e => {
+      const rect = canvas.getBoundingClientRect();
+      const c = ((e.clientX - rect.left) / SQUARE_SIZE) | 0;
+      const r = ((e.clientY - rect.top) / SQUARE_SIZE) | 0;
+      if (r < 0 || r >= BOARD_SIZE || c < 0 || c >= BOARD_SIZE) return;
+      if (hasKing[r][c]) {
+        hasKing[r][c] = false;
+        kings = kings.filter(k => k[0] !== r || k[1] !== c);
+        rowCounts[r]--;
+        colCounts[c]--;
+      } else if (!isRestricted[r][c] && rowCounts[r] < MAX_LINE && colCounts[c] < MAX_LINE) {
+        placeKing(r, c);
+      }
+      isRestricted.forEach(row => row.fill(false));
+      kings.forEach(([rr, cc]) => neighborOffsets.forEach(([dr, dc]) => {
+        const nr = rr + dr, nc = cc + dc;
+        if (nr >= 0 && nr < BOARD_SIZE && nc >= 0 && nc < BOARD_SIZE && !hasKing[nr][nc]) {
+          isRestricted[nr][nc] = true;
+        }
+      }));
+      drawBoard();
+      feedbackDiv.textContent = '';
+    });
+
+    function drawBoard() {
+      ctx.clearRect(0, 0, canvas.width, canvas.height);
+      for (let r = 0; r < BOARD_SIZE; r++) {
+        for (let c = 0; c < BOARD_SIZE; c++) {
+          const x = c * SQUARE_SIZE, y = r * SQUARE_SIZE;
+          const fullRow = rowCounts[r] >= MAX_LINE;
+          const fullCol = colCounts[c] >= MAX_LINE;
+          if (fullRow || fullCol) ctx.fillStyle = '#db2b39';
+          else if (isRestricted[r][c]) ctx.fillStyle = '#db2b39';
+          else ctx.fillStyle = ((r + c) & 1) ? '#6e9887' : '#82ac9b';
+          ctx.fillRect(x, y, SQUARE_SIZE, SQUARE_SIZE);
+          ctx.strokeRect(x, y, SQUARE_SIZE, SQUARE_SIZE);
+        }
+      }
+      kings.forEach(([r, c]) => {
+        const cx = c * SQUARE_SIZE + SQUARE_SIZE / 2;
+        const cy = r * SQUARE_SIZE + SQUARE_SIZE / 2;
+        const rad = SQUARE_SIZE / 2 - 8;
+        ctx.beginPath();
+        ctx.arc(cx, cy, rad, 0, 2 * Math.PI);
+        ctx.fillStyle = '#f3a712';
+        ctx.fill();
+        ctx.stroke();
+      });
+      countSpan.textContent = `Kings: ${kings.length}`;
+    }
+
+    updateDimensions();
+  </script>
+</body>
+</html>
